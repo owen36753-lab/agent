@@ -2,3 +2,21 @@
 results/*.json
 results/*.jsonl
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Optional future artifacts
+training/
+videos/
+data/
+*.pt
+*.pth

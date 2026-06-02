@@ -27,6 +27,8 @@ def main() -> None:
     observation, info = env.reset()
     action = _select_action(info)
     new_observation, reward, done, new_info = env.step(action)
+    if not new_info.get("action_valid"):
+        raise RuntimeError(f"Adapter rejected an admissible action: {action}")
 
     print("Real ALFWorld reset/step smoke test passed.")
     print(f"Observation: {observation[:300]}")

@@ -15,7 +15,12 @@ def _first(value: Any) -> Any:
 class ALFWorldEnv:
     """Wrap ALFWorld's batched text environment as a single-episode interface."""
 
-    def __init__(self, config_path: str, split: str) -> None:
+    def __init__(
+        self,
+        config_path: str,
+        split: str,
+        task_types: list[int] | None = None,
+    ) -> None:
         if not config_path:
             raise ValueError("Set ALFWORLD_CONFIG_PATH to an ALFWorld YAML config file.")
         if not Path(config_path).is_file():
@@ -32,22 +37,42 @@ class ALFWorldEnv:
         with open(config_path, "r", encoding="utf-8") as config_file:
             config = yaml.safe_load(config_file)
 
+        config["general"]["use_cuda"] = False
+        if task_types is not None:
+            config["env"]["task_types"] = task_types
+
         env_type = config["env"]["type"]
         env_class = get_environment(env_type)
         self._env = env_class(config, train_eval=split).init_env(batch_size=1)
+        self._admissible_commands: set[str] = set()
 
     def reset(self) -> tuple[str, dict[str, Any]]:
         observations, infos = self._env.reset()
-        return str(_first(observations)), self._normalize_info(infos)
+        normalized_info = self._normalize_info(infos)
+        self._admissible_commands = self._commands_from(normalized_info)
+        return str(_first(observations)), normalized_info
 
     def step(self, action: str) -> tuple[str, float, bool, dict[str, Any]]:
+        action_valid = (
+            action in self._admissible_commands
+            if self._admissible_commands
+            else bool(action)
+        )
         observations, rewards, dones, infos = self._env.step([action])
+        normalized_info = self._normalize_info(infos)
+        normalized_info["action_valid"] = action_valid
+        self._admissible_commands = self._commands_from(normalized_info)
         return (
             str(_first(observations)),
             float(_first(rewards)),
             bool(_first(dones)),
-            self._normalize_info(infos),
+            normalized_info,
         )
+
+    @staticmethod
+    def _commands_from(info: dict[str, Any]) -> set[str]:
+        commands = info.get("admissible_commands") or []
+        return {str(command) for command in commands}
 
     @staticmethod
     def _normalize_info(infos: Any) -> dict[str, Any]:

@@ -13,7 +13,10 @@ from config import (
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_MODEL,
+    LLM_MAX_RETRIES,
+    LLM_MIN_REQUEST_INTERVAL_SECONDS,
     LLM_PROVIDER,
+    LLM_RETRY_BASE_SECONDS,
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
     MAX_STEPS,
@@ -56,6 +59,9 @@ def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
         base_url=LLM_BASE_URL,
         temperature=LLM_TEMPERATURE,
         timeout_seconds=LLM_TIMEOUT_SECONDS,
+        min_request_interval_seconds=LLM_MIN_REQUEST_INTERVAL_SECONDS,
+        max_retries=LLM_MAX_RETRIES,
+        retry_base_seconds=LLM_RETRY_BASE_SECONDS,
     )
     return env, ReActAgent(client)
 
@@ -144,4 +150,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
