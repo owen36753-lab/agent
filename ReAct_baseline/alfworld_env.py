@@ -52,13 +52,15 @@ class ALFWorldEnv:
     @staticmethod
     def _normalize_info(infos: Any) -> dict[str, Any]:
         if isinstance(infos, list):
-            return dict(infos[0]) if infos else {}
-        if isinstance(infos, dict):
-            normalized: dict[str, Any] = {}
-            for key, value in infos.items():
-                normalized[key] = _first(value)
-            return normalized
-        return {}
+            normalized = dict(infos[0]) if infos else {}
+        elif isinstance(infos, dict):
+            normalized = {key: _first(value) for key, value in infos.items()}
+        else:
+            normalized = {}
+
+        if "success" not in normalized and "won" in normalized:
+            normalized["success"] = bool(normalized["won"])
+        return normalized
 
 
 class MockALFWorldEnv:
