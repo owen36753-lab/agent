@@ -1,0 +1,4 @@
+# Generated experiment outputs
+results/*.json
+results/*.jsonl
+

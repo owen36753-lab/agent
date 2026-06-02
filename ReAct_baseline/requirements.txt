@@ -1,0 +1,3 @@
+# Install inside Linux or WSL. Jericho, pulled in by TextWorld, requires Linux.
+alfworld==0.4.2
+PyYAML==6.0.3
