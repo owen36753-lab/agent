@@ -28,6 +28,9 @@ The setup script installs the text-only Python dependencies and downloads ALFWor
 to `~/.cache/alfworld/`. The dataset and virtual environment stay local and are not
 committed to Git.
 
+TextWorld supports Python 3.9 through 3.12. Do not use Python 3.13 or newer for the
+real ALFWorld environment. The setup script automatically selects a supported interpreter.
+
 Configure an OpenAI-compatible LLM endpoint before a real agent run:
 
 ```bash
