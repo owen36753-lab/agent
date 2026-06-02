@@ -14,15 +14,29 @@ python evaluator.py
 
 ## Real ALFWorld Run
 
-Install ALFWorld and PyYAML in your Python environment, then configure:
+The text-only ALFWorld dependency chain requires Linux. On Windows, run it inside WSL.
+From an Ubuntu terminal:
 
-```powershell
-$env:ALFWORLD_CONFIG_PATH = "C:\path\to\alfworld\config.yaml"
-$env:ALFWORLD_SPLIT = "eval_out_of_distribution"
-$env:LLM_PROVIDER = "openai_compatible"
-$env:LLM_MODEL = "your-model"
-$env:LLM_API_KEY = "your-api-key"
-$env:LLM_BASE_URL = "https://api.openai.com/v1"
+```bash
+cd "/mnt/c/Users/Mr.Orange/Desktop/agent/git-workspace/agent/ReAct_baseline"
+bash scripts/setup_text_baseline.sh
+source ~/.venvs/react-baseline/bin/activate
+python real_env_smoke_test.py
+```
+
+The setup script installs the text-only Python dependencies and downloads ALFWorld data
+to `~/.cache/alfworld/`. The dataset and virtual environment stay local and are not
+committed to Git.
+
+Configure an OpenAI-compatible LLM endpoint before a real agent run:
+
+```bash
+export ALFWORLD_CONFIG_PATH="$PWD/configs/base_config.yaml"
+export ALFWORLD_SPLIT="eval_out_of_distribution"
+export LLM_PROVIDER="openai_compatible"
+export LLM_MODEL="your-model"
+export LLM_API_KEY="your-api-key"
+export LLM_BASE_URL="https://api.openai.com/v1"
 python main.py --episodes 10 --max-steps 30 --clear-results
 ```
 

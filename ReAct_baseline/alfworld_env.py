@@ -23,7 +23,7 @@ class ALFWorldEnv:
 
         try:
             import yaml
-            import alfworld.agents.environment as environment
+            from alfworld.agents.environment import get_environment
         except ImportError as exc:
             raise RuntimeError(
                 "Install ALFWorld and PyYAML before running the real environment."
@@ -33,7 +33,7 @@ class ALFWorldEnv:
             config = yaml.safe_load(config_file)
 
         env_type = config["env"]["type"]
-        env_class = getattr(environment, env_type)
+        env_class = get_environment(env_type)
         self._env = env_class(config, train_eval=split).init_env(batch_size=1)
 
     def reset(self) -> tuple[str, dict[str, Any]]:
@@ -78,4 +78,3 @@ class MockALFWorldEnv:
         if self._step == 2 and action == "finish":
             return "Task complete.", 1.0, True, {"success": True, "action_valid": True}
         return "Nothing happens.", 0.0, False, {"action_valid": False}
-
