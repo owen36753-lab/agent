@@ -1,0 +1,3 @@
+# Install inside the same WSL environment used by ReAct_baseline.
+-r ../ReAct_baseline/requirements.txt
+langgraph==1.2.4

@@ -1,0 +1,15 @@
+# Generated experiment outputs
+results/*.json
+results/*.jsonl
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
