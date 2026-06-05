@@ -12,13 +12,14 @@ The first LangGraph version is intentionally conservative:
 ```text
 initialize
   -> act
+  -> format_repair, only when Action parsing fails
   -> step
   -> route
   -> finalize
 ```
 
 It does not add memory, reflection, replanning, or fine-tuning yet. The purpose is to create a
-graph-shaped execution surface where those branches can be added later without disturbing the
+graph-shaped execution surface where small control-flow repairs can be added without disturbing the
 successful Plain ReAct baseline.
 
 ## Why LangGraph Here
@@ -33,6 +34,10 @@ initialize_node:
 act_node:
     build ReAct prompt, call LLM, parse Thought / Action
 
+format_repair_node:
+    if the LLM response has no parseable Action line, ask the model to repair only the format before
+    touching the environment
+
 step_node:
     execute env.step(action), log result, update feedback and guard counters
 
@@ -46,13 +51,24 @@ finalize_node:
 This makes it easier to add future nodes such as:
 
 ```text
-format_repair
 invalid_action_retry
 reflection
 replan
 human_review
 memory_update
 ```
+
+The current implementation already includes the first graph-native repair branch:
+
+```text
+act
+  -> step, when Action is parseable
+  -> format_repair -> step, when Action parsing fails once
+```
+
+If repair still fails, the episode falls back to the existing logged failure path. This keeps the
+behavior debuggable: every environment step still records the raw response, and repair text is
+appended under a `[FORMAT_REPAIR_RAW_RESPONSE]` marker.
 
 ## Install
 

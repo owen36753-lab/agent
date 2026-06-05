@@ -36,7 +36,7 @@ from evaluator import evaluate  # noqa: E402
 from failure_classifier import classify_failure  # noqa: E402
 from llm_client import MockLLMClient, OpenAICompatibleLLMClient  # noqa: E402
 from logger import ExperimentLogger  # noqa: E402
-from react_agent import ReActAgent  # noqa: E402
+from react_agent import ReActAgent, parse_action, parse_thought  # noqa: E402
 
 
 RESULTS_DIR = PROJECT_DIR / "results"
@@ -55,6 +55,7 @@ class GraphState(TypedDict, total=False):
     thought: str
     action: str
     raw_response: str
+    format_repair_attempted: bool
     step_number: int
     success: bool
     total_reward: float
@@ -107,6 +108,26 @@ def _feedback_from_previous_step(
             f"Choose exactly one available action. Examples now available: {preview}"
         )
     return None
+
+
+def _build_format_repair_prompt(
+    goal: str,
+    observation: str,
+    raw_response: str,
+    admissible_commands: list[str],
+) -> str:
+    actions = "\n".join(f"- {action}" for action in admissible_commands) or "(not provided)"
+    return (
+        "Your previous ALFWorld response did not contain a valid Action line.\n"
+        "Repair the response without changing the task intent.\n"
+        "Output exactly two lines and nothing else:\n"
+        "Thought: <brief reason>\n"
+        "Action: <one available action copied exactly>\n\n"
+        f"Goal: {goal}\n"
+        f"Current observation: {observation}\n"
+        f"Previous raw response:\n{raw_response}\n\n"
+        f"Available actions:\n{actions}\n"
+    )
 
 
 def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
@@ -163,6 +184,28 @@ def act_node(state: GraphState) -> dict[str, Any]:
         "thought": thought,
         "action": action,
         "raw_response": raw_response,
+        "format_repair_attempted": False,
+    }
+
+
+def format_repair_node(state: GraphState) -> dict[str, Any]:
+    repair_prompt = _build_format_repair_prompt(
+        state["goal"],
+        state["observation"],
+        state["raw_response"],
+        state["admissible_commands"],
+    )
+    repair_response = state["agent"].llm_client.generate(repair_prompt)
+    repaired_thought = parse_thought(repair_response)
+    repaired_action = parse_action(repair_response)
+    return {
+        "thought": repaired_thought or state["thought"],
+        "action": repaired_action,
+        "raw_response": (
+            f"{state['raw_response']}\n\n"
+            f"[FORMAT_REPAIR_RAW_RESPONSE]\n{repair_response}"
+        ),
+        "format_repair_attempted": True,
     }
 
 
@@ -186,6 +229,7 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "thought": state["thought"],
         "action": action,
         "raw_response": state["raw_response"],
+        "format_repair_attempted": state.get("format_repair_attempted", False),
         "new_observation": new_observation,
         "reward": reward,
         "done": done,
@@ -258,6 +302,12 @@ def route_after_step(state: GraphState) -> Literal["act", "finalize"]:
     return "finalize" if state["done"] else "act"
 
 
+def route_after_act(state: GraphState) -> Literal["format_repair", "step"]:
+    if state.get("action") or state.get("format_repair_attempted", False):
+        return "step"
+    return "format_repair"
+
+
 def build_graph() -> Any:
     try:
         from langgraph.graph import END, START, StateGraph
@@ -270,11 +320,17 @@ def build_graph() -> Any:
     graph = StateGraph(GraphState)
     graph.add_node("initialize", initialize_node)
     graph.add_node("act", act_node)
+    graph.add_node("format_repair", format_repair_node)
     graph.add_node("step", step_node)
     graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "act")
-    graph.add_edge("act", "step")
+    graph.add_conditional_edges(
+        "act",
+        route_after_act,
+        {"format_repair": "format_repair", "step": "step"},
+    )
+    graph.add_edge("format_repair", "step")
     graph.add_conditional_edges(
         "step",
         route_after_step,
