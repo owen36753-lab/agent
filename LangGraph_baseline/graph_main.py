@@ -56,6 +56,7 @@ class GraphState(TypedDict, total=False):
     action: str
     raw_response: str
     format_repair_attempted: bool
+    invalid_action_retry_attempted: bool
     step_number: int
     success: bool
     total_reward: float
@@ -130,6 +131,32 @@ def _build_format_repair_prompt(
     )
 
 
+def _build_invalid_action_retry_prompt(
+    goal: str,
+    observation: str,
+    previous_action: str,
+    admissible_commands: list[str],
+) -> str:
+    actions = "\n".join(f"- {action}" for action in admissible_commands) or "(not provided)"
+    return (
+        "Your previous ALFWorld action was not in the available actions list.\n"
+        "Choose a valid action for the same observation.\n"
+        "Output exactly two lines and nothing else:\n"
+        "Thought: <brief reason>\n"
+        "Action: <one available action copied exactly>\n\n"
+        f"Goal: {goal}\n"
+        f"Current observation: {observation}\n"
+        f"Invalid previous action: {previous_action}\n\n"
+        f"Available actions:\n{actions}\n"
+    )
+
+
+def _is_action_available(action: str, admissible_commands: list[str]) -> bool:
+    if not action or not admissible_commands:
+        return True
+    return action in admissible_commands
+
+
 def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
     if use_mock:
         return MockALFWorldEnv(), ReActAgent(MockLLMClient())
@@ -185,6 +212,7 @@ def act_node(state: GraphState) -> dict[str, Any]:
         "action": action,
         "raw_response": raw_response,
         "format_repair_attempted": False,
+        "invalid_action_retry_attempted": False,
     }
 
 
@@ -209,6 +237,27 @@ def format_repair_node(state: GraphState) -> dict[str, Any]:
     }
 
 
+def invalid_action_retry_node(state: GraphState) -> dict[str, Any]:
+    retry_prompt = _build_invalid_action_retry_prompt(
+        state["goal"],
+        state["observation"],
+        state["action"],
+        state["admissible_commands"],
+    )
+    retry_response = state["agent"].llm_client.generate(retry_prompt)
+    retry_thought = parse_thought(retry_response)
+    retry_action = parse_action(retry_response)
+    return {
+        "thought": retry_thought or state["thought"],
+        "action": retry_action,
+        "raw_response": (
+            f"{state['raw_response']}\n\n"
+            f"[INVALID_ACTION_RETRY_RAW_RESPONSE]\n{retry_response}"
+        ),
+        "invalid_action_retry_attempted": True,
+    }
+
+
 def step_node(state: GraphState) -> dict[str, Any]:
     step_number = state["step_number"] + 1
     action = state.get("action", "")
@@ -230,6 +279,7 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "action": action,
         "raw_response": state["raw_response"],
         "format_repair_attempted": state.get("format_repair_attempted", False),
+        "invalid_action_retry_attempted": state.get("invalid_action_retry_attempted", False),
         "new_observation": new_observation,
         "reward": reward,
         "done": done,
@@ -302,10 +352,14 @@ def route_after_step(state: GraphState) -> Literal["act", "finalize"]:
     return "finalize" if state["done"] else "act"
 
 
-def route_after_act(state: GraphState) -> Literal["format_repair", "step"]:
-    if state.get("action") or state.get("format_repair_attempted", False):
-        return "step"
-    return "format_repair"
+def route_after_act(state: GraphState) -> Literal["format_repair", "invalid_action_retry", "step"]:
+    action = state.get("action", "")
+    if not action:
+        return "step" if state.get("format_repair_attempted", False) else "format_repair"
+    if not _is_action_available(action, state.get("admissible_commands", [])):
+        if not state.get("invalid_action_retry_attempted", False):
+            return "invalid_action_retry"
+    return "step"
 
 
 def build_graph() -> Any:
@@ -321,6 +375,7 @@ def build_graph() -> Any:
     graph.add_node("initialize", initialize_node)
     graph.add_node("act", act_node)
     graph.add_node("format_repair", format_repair_node)
+    graph.add_node("invalid_action_retry", invalid_action_retry_node)
     graph.add_node("step", step_node)
     graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "initialize")
@@ -328,9 +383,22 @@ def build_graph() -> Any:
     graph.add_conditional_edges(
         "act",
         route_after_act,
-        {"format_repair": "format_repair", "step": "step"},
+        {
+            "format_repair": "format_repair",
+            "invalid_action_retry": "invalid_action_retry",
+            "step": "step",
+        },
     )
-    graph.add_edge("format_repair", "step")
+    graph.add_conditional_edges(
+        "format_repair",
+        route_after_act,
+        {
+            "format_repair": "format_repair",
+            "invalid_action_retry": "invalid_action_retry",
+            "step": "step",
+        },
+    )
+    graph.add_edge("invalid_action_retry", "step")
     graph.add_conditional_edges(
         "step",
         route_after_step,

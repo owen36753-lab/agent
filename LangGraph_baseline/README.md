@@ -13,6 +13,7 @@ The first LangGraph version is intentionally conservative:
 initialize
   -> act
   -> format_repair, only when Action parsing fails
+  -> invalid_action_retry, only when Action is not available
   -> step
   -> route
   -> finalize
@@ -38,6 +39,10 @@ format_repair_node:
     if the LLM response has no parseable Action line, ask the model to repair only the format before
     touching the environment
 
+invalid_action_retry_node:
+    if the Action line is parseable but not in admissible_commands, ask the model to choose exactly
+    one available action before touching the environment
+
 step_node:
     execute env.step(action), log result, update feedback and guard counters
 
@@ -58,17 +63,22 @@ human_review
 memory_update
 ```
 
-The current implementation already includes the first graph-native repair branch:
+The current implementation already includes two graph-native repair branches:
 
 ```text
 act
   -> step, when Action is parseable
   -> format_repair -> step, when Action parsing fails once
+  -> invalid_action_retry -> step, when Action is parseable but unavailable
 ```
 
 If repair still fails, the episode falls back to the existing logged failure path. This keeps the
 behavior debuggable: every environment step still records the raw response, and repair text is
-appended under a `[FORMAT_REPAIR_RAW_RESPONSE]` marker.
+appended under `[FORMAT_REPAIR_RAW_RESPONSE]` or `[INVALID_ACTION_RETRY_RAW_RESPONSE]` markers.
+
+Both repair branches are intentionally one-shot guards. They reduce obvious LLM interface failures
+without adding memory, reflection, or replanning, so the experiment remains close to the original
+ReAct baseline.
 
 ## Install
 
