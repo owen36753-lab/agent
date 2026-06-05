@@ -19,6 +19,7 @@ from config import (
     LLM_RETRY_BASE_SECONDS,
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
+    MAX_CONSECUTIVE_FORMAT_ERRORS,
     MAX_STEPS,
     NUM_EPISODES,
     RESULTS_DIR,
@@ -44,6 +45,32 @@ def _action_valid_from(info: dict[str, Any], action: str) -> bool:
 
 def _goal_from(observation: str, info: dict[str, Any]) -> str:
     return str(info.get("goal") or info.get("task") or observation)
+
+
+def _admissible_commands_from(info: dict[str, Any]) -> list[str]:
+    commands = info.get("admissible_commands") or []
+    return [str(command) for command in commands]
+
+
+def _feedback_from_previous_step(
+    action: str,
+    action_valid: bool,
+    format_error: bool,
+    admissible_commands: list[str],
+) -> str | None:
+    if format_error:
+        return (
+            "Your previous response did not contain a valid 'Action: ...' line. "
+            "Now output exactly two lines: 'Thought: ...' and 'Action: ...'. "
+            "Copy the Action exactly from the available actions list."
+        )
+    if not action_valid:
+        preview = "; ".join(admissible_commands[:8])
+        return (
+            f"Previous action was invalid: {action!r}. "
+            f"Choose exactly one available action. Examples now available: {preview}"
+        )
+    return None
 
 
 def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
@@ -81,12 +108,26 @@ def run_episode(
     total_reward = 0.0
     step_logs: list[dict[str, Any]] = []
     final_observation = observation
+    current_info = reset_info
+    feedback: str | None = None
+    consecutive_format_errors = 0
+    early_stop_reason = None
 
     for step_number in range(1, max_steps + 1):
-        thought, action, raw_response = agent.act(goal, observation)
+        admissible_commands = _admissible_commands_from(current_info)
+        thought, action, raw_response = agent.act(
+            goal,
+            observation,
+            admissible_commands,
+            feedback,
+        )
+        format_error = not action
         new_observation, reward, done, info = env.step(action)
         success = _success_from(info, done, reward)
         action_valid = _action_valid_from(info, action)
+        consecutive_format_errors = (
+            consecutive_format_errors + 1 if format_error else 0
+        )
         total_reward += reward
 
         step_log = {
@@ -94,6 +135,7 @@ def run_episode(
             "step": step_number,
             "goal": goal,
             "observation": observation,
+            "admissible_commands": admissible_commands,
             "thought": thought,
             "action": action,
             "raw_response": raw_response,
@@ -102,20 +144,37 @@ def run_episode(
             "done": done,
             "success": success,
             "action_valid": action_valid,
+            "format_error": format_error,
+            "consecutive_format_errors": consecutive_format_errors,
         }
         logger.log_step(step_log)
         step_logs.append(step_log)
-        agent.record_step(observation, thought, action, new_observation)
-        observation = new_observation
+        if not format_error:
+            agent.record_step(observation, thought, action, new_observation)
+        feedback = _feedback_from_previous_step(
+            action,
+            action_valid,
+            format_error,
+            admissible_commands,
+        )
+        if not format_error:
+            observation = new_observation
         final_observation = new_observation
+        current_info = info
 
+        if consecutive_format_errors >= MAX_CONSECUTIVE_FORMAT_ERRORS:
+            early_stop_reason = "format_collapse"
+            break
         if done:
             break
 
     num_steps = len(step_logs)
     failure_reason = None
     if not success:
-        failure_reason = classify_failure(step_logs, reached_max_steps=num_steps >= max_steps)
+        failure_reason = early_stop_reason or classify_failure(
+            step_logs,
+            reached_max_steps=num_steps >= max_steps,
+        )
 
     summary = {
         "episode_id": episode_id,
@@ -124,6 +183,7 @@ def run_episode(
         "num_steps": num_steps,
         "total_reward": total_reward,
         "failure_reason": failure_reason,
+        "early_stop_reason": early_stop_reason,
         "final_observation": final_observation,
     }
     logger.log_episode(summary)

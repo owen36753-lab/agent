@@ -29,8 +29,14 @@ class ReActAgent:
     def reset(self) -> None:
         self.history.clear()
 
-    def act(self, goal: str, observation: str) -> tuple[str, str, str]:
-        prompt = build_react_prompt(goal, observation, self.history)
+    def act(
+        self,
+        goal: str,
+        observation: str,
+        available_actions: list[str] | None = None,
+        feedback: str | None = None,
+    ) -> tuple[str, str, str]:
+        prompt = build_react_prompt(goal, observation, self.history, available_actions, feedback)
         raw_response = self.llm_client.generate(prompt)
         return parse_thought(raw_response), parse_action(raw_response), raw_response
 
@@ -49,4 +55,3 @@ class ReActAgent:
                 "new_observation": new_observation,
             }
         )
-

@@ -11,6 +11,7 @@ RESULTS_DIR = PROJECT_DIR / "results"
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
 NUM_EPISODES = int(os.getenv("NUM_EPISODES", "1"))
+MAX_CONSECUTIVE_FORMAT_ERRORS = int(os.getenv("MAX_CONSECUTIVE_FORMAT_ERRORS", "3"))
 
 ALFWORLD_CONFIG_PATH = os.getenv("ALFWORLD_CONFIG_PATH", "")
 ALFWORLD_SPLIT = os.getenv("ALFWORLD_SPLIT", "eval_out_of_distribution")

@@ -18,6 +18,30 @@ Mock 环境回归测试
     -> JSONL 日志记录
     -> 规则式失败分类
     -> 自动生成评估报告
+    -> 本地 qwen3:4b 真实任务成功样例
+```
+
+v1.1 在第一版基础上增加了一项最小优化：每一步将 ALFWorld 返回的
+`admissible_commands` 传入 ReAct Prompt，并写入 step-level 日志。这样模型不再完全
+凭空猜动作，而是在当前合法动作集合中选择一个动作。
+
+v1.2 继续保持 Plain ReAct，只在 Prompt 中加入少量 ALFWorld 动作优先级规则，例如
+看到目标物就 `take`，当前位置是关闭容器就先 `open`，拿到目标物后再执行
+`heat` / `cool` / `clean` 和最终放置。这些提示不引入规划器、记忆、反思或重试机制。
+
+长步数测试进一步暴露了格式崩溃问题：模型在中后段会输出 Markdown、`Answer:` 或缺失
+`Action:` 行，导致空动作连续出现。当前版本增加了 ReAct 内部护栏：将上一轮
+`format_error` 反馈给下一轮 Prompt，并在连续格式错误达到阈值时提前停止，避免长测
+无意识空跑。
+
+在加入格式反馈和早停护栏后，本地 `qwen3:4b` 成功完成一次真实任务：
+
+```text
+task: heat some apple and put it in fridge
+actual_steps: 32
+elapsed: 256.28 seconds
+success: true
+reward: 1.0
 ```
 
 需要区分两个结论：
@@ -33,6 +57,7 @@ Mock 环境回归测试
 
 ```text
 Observation
+    + Available actions
     -> 构造 Prompt
     -> LLM 输出 Thought 和一条 Action
     -> 解析 Action: 后的第一行
@@ -106,6 +131,7 @@ goal
 observation
 thought
 action
+admissible_commands
 raw_response
 new_observation
 reward
@@ -151,6 +177,9 @@ failure reason distribution
 
 真实环境动作合法性使用执行动作前的 `admissible_commands` 判断。它表示命令是否属于
 当前环境允许集合，不代表动作一定有助于完成任务。
+
+v1.1 之后，同一份 `admissible_commands` 也会交给 LLM，并记录到日志中，便于检查模型
+是否从合法动作集合中复制动作。
 
 ## 4. 完整复现流程
 
@@ -361,6 +390,32 @@ open cabinet 1
 模型还在部分步骤输出长篇解释而没有提供严格的 `Action:` 行。解析器将这些动作记录为
 空字符串，并通过 `raw_response` 保留原始输出，便于分析。
 
+v1.1 已针对首轮最明显的问题做出修复：将 `admissible_commands` 放入 Prompt，并要求
+`Action` 必须从列表中复制。该改动仍属于 Plain ReAct baseline，不引入复杂控制流。
+
+v1.2 进一步补充最小动作优先级规则，目标是降低“合法但低效”的盲目搜索，让模型更快从
+搜索阶段转向拿取、处理和放置阶段。20 步短测中，模型仍未找到苹果，但已经保持
+`action_valid_rate=1.0`，并从柜子扩展到抽屉、台面和货架。
+
+80 步上限长测实际在第 50 步结束，耗时约 729 秒。第 23 步后模型开始频繁缺失严格
+`Action:` 行，形成连续空动作。这个结果说明后续追求 success 前，必须先处理格式稳定性
+和崩溃早停。
+
+加入格式反馈和早停护栏后，再次以 `max_steps=80` 运行同一类任务，模型在 32 步成功：
+
+```text
+go to sinkbasin 1
+take apple 3 from sinkbasin 1
+go to microwave 1
+open microwave 1
+heat apple 3 with microwave 1
+go to fridge 1
+open fridge 1
+move apple 3 to fridge 1
+```
+
+其中第 24、26、29 步出现格式错误，但下一步均被反馈机制纠正，没有形成空动作连锁。
+
 ## 7. 遇到的问题与解决方案
 
 | 问题 | 原因 | 解决方案 |
@@ -372,6 +427,8 @@ open cabinet 1
 | WSL 访问 Ollama 报 `Connection refused` | Ollama 只监听 Windows `127.0.0.1` | 使用 WSL 虚拟网卡 `portproxy` 安全转发，不监听 `0.0.0.0` |
 | `llama3.2:3b` 输出格式不稳定 | 小模型指令遵循能力有限 | 本机 baseline 改用 `qwen3:4b` |
 | 历史 `action_valid_rate` 偏高 | 非空动作被默认视为有效 | 使用执行前的 `admissible_commands` 判断真实环境动作合法性 |
+| 长测试中格式崩溃连锁 | 模型输出缺失 `Action:` 或使用 Markdown / `Answer:` | 将 `format_error` 反馈给下一轮 Prompt，并设置连续格式错误早停 |
+| 长测试无意识空跑 | 空 action 后环境持续返回 `Nothing happens` | 连续格式错误达到 `MAX_CONSECUTIVE_FORMAT_ERRORS` 时标记 `format_collapse` 并提前结束 |
 
 ## 8. 首轮结果分析
 
@@ -393,8 +450,9 @@ open cabinet 1
 
 按优先级建议：
 
-1. 将当前状态的 `admissible_commands` 提供给 LLM。
-2. 在 Prompt 中加入少量 ALFWorld 命令示例，例如先 `go to` 再 `open`。
+1. 重新运行本地 `qwen3:4b` episode，观察 `action_valid_rate`、空 action 数量和
+   `Nothing happens` 连续次数是否改善。
+2. 对比 v1.1 与 v1.2 的同一任务短 episode，观察是否更快进入拿取或处理阶段。
 3. 对比本地 `qwen3:4b` 与更强云端模型，重新运行多个 episode。
 4. 固定数据 split、模型、温度和最大步数，记录可比较的指标。
 5. Plain ReAct 稳定后，再单独增加 memory、reflection 或 LangGraph 流程控制。

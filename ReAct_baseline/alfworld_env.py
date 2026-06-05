@@ -96,12 +96,28 @@ class MockALFWorldEnv:
 
     def reset(self) -> tuple[str, dict[str, Any]]:
         self._step = 0
-        return "You are in a room. Find and finish the mock task.", {"goal": "Finish the mock task."}
+        return (
+            "You are in a room. Find and finish the mock task.",
+            {
+                "goal": "Finish the mock task.",
+                "admissible_commands": ["look"],
+            },
+        )
 
     def step(self, action: str) -> tuple[str, float, bool, dict[str, Any]]:
         self._step += 1
         if self._step == 1 and action == "look":
-            return "The target is visible.", 0.0, False, {"action_valid": True}
+            return (
+                "The target is visible.",
+                0.0,
+                False,
+                {"action_valid": True, "admissible_commands": ["finish"]},
+            )
         if self._step == 2 and action == "finish":
             return "Task complete.", 1.0, True, {"success": True, "action_valid": True}
-        return "Nothing happens.", 0.0, False, {"action_valid": False}
+        return (
+            "Nothing happens.",
+            0.0,
+            False,
+            {"action_valid": False, "admissible_commands": ["look"]},
+        )

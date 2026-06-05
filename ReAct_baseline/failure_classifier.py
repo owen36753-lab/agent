@@ -10,6 +10,9 @@ def classify_failure(step_logs: list[dict[str, Any]], reached_max_steps: bool) -
     if not step_logs:
         return "unknown_failure"
 
+    if any(step.get("format_error") for step in step_logs):
+        return "format_error"
+
     if any(not step["action_valid"] for step in step_logs):
         return "invalid_action"
 
@@ -23,4 +26,3 @@ def classify_failure(step_logs: list[dict[str, Any]], reached_max_steps: bool) -
         return "max_steps_exceeded"
 
     return "unknown_failure"
-

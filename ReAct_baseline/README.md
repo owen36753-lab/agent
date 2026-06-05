@@ -18,6 +18,9 @@ LangGraph、长期记忆、反思、重规划或微调。
 | Gemini 免费层 LLM API | 已验证 | `gemini-2.5-flash-lite` 连通测试通过；免费额度可能不足以持续跑完整 episode |
 | Ollama 本地 LLM | 已验证 | Windows 运行 `qwen3:4b`，通过 WSL 虚拟网卡端口转发供 Ubuntu 调用 |
 | 本地模型真实 episode | 已完成首轮 | 完整运行 30 步并生成评估报告；首轮任务未成功，作为后续改进起点 |
+| `admissible_commands` 接入 | 已完成 | 每步将 ALFWorld 当前可选动作传入 Prompt，并记录到日志 |
+| ALFWorld 动作优先级提示 | 已完成 | Prompt 中加入简短操作常识，如看到目标先 `take`、关闭容器先 `open`、热任务使用 microwave |
+| 格式崩溃保护 | 已完成 | 反馈上一轮格式错误，连续空动作达到阈值时提前停止 |
 
 真实环境 smoke test 已验证：
 
@@ -28,6 +31,37 @@ Action: go to cabinet 1
 Reward: 0.0
 Done: False
 ```
+
+## 最近成功运行
+
+当前版本已使用本地 Ollama `qwen3:4b` 在真实 ALFWorld 文本环境中跑出一次成功：
+
+```text
+task: heat some apple and put it in fridge
+max_steps: 80
+actual_steps: 32
+elapsed: 256.28 seconds
+success: true
+total_reward: 1.0
+action_valid_rate: 0.90625
+early_stop_reason: null
+```
+
+关键动作链：
+
+```text
+go to sinkbasin 1
+take apple 3 from sinkbasin 1
+go to microwave 1
+open microwave 1
+heat apple 3 with microwave 1
+go to fridge 1
+open fridge 1
+move apple 3 to fridge 1
+```
+
+这次运行中出现过 3 次格式错误，例如模型只输出 `go to microwave 1` 而没有
+`Action:` 前缀。格式反馈机制在下一步将其纠正，没有进入连续空动作崩溃。
 
 ## 第一版阶段报告
 
@@ -43,6 +77,7 @@ docs/FIRST_BASELINE_REPORT.md
 
 ```text
 Observation
+    + Available actions
     -> 构造 Prompt
     -> LLM 输出 Thought 和一条 Action
     -> 解析第一条 Action
@@ -330,6 +365,25 @@ Action: ...
 `parse_action()` 只读取第一个 `Action:` 后面的第一行。即使模型额外输出内容，
 环境也只接收一条动作。
 
+真实 ALFWorld 运行时，Prompt 会附带当前环境返回的 `admissible_commands`。模型必须从
+该列表中复制一个动作作为 `Action`。这仍然是 Plain ReAct：没有加入搜索器、规划器或
+重试控制，只是把环境已经给出的合法动作空间交给 LLM。
+
+Prompt 还包含少量 ALFWorld 动作优先级规则，例如：
+
+```text
+看到目标物且 take 可用 -> take
+当前位置是关闭容器且 open 可用 -> open
+已经拿到目标物 -> heat/cool/clean，再放入目标容器
+```
+
+这些规则只用于提醒模型环境语法和常见任务流程，不会在代码中硬编码专家策略。
+
+如果模型上一轮没有输出可解析的 `Action:` 行，下一轮 Prompt 会显式提示格式错误，并要求
+重新从 `admissible_commands` 中复制动作。连续格式错误达到
+`MAX_CONSECUTIVE_FORMAT_ERRORS` 后，episode 会提前停止并记录为 `format_collapse`。
+这仍然属于 ReAct 基础护栏，不做反思、不做重规划。
+
 ### 保存原始响应
 
 每一步都会保存 `raw_response`。这样可以区分：
@@ -368,6 +422,7 @@ episode_id
 step
 goal
 observation
+admissible_commands
 thought
 action
 raw_response
@@ -376,6 +431,8 @@ reward
 done
 success
 action_valid
+format_error
+consecutive_format_errors
 ```
 
 ### Episode-level 字段
@@ -387,6 +444,7 @@ success
 num_steps
 total_reward
 failure_reason
+early_stop_reason
 final_observation
 ```
 
@@ -411,6 +469,8 @@ failure reason distribution
 
 ```text
 invalid_action
+format_error
+format_collapse
 repeated_action_loop
 max_steps_exceeded
 unknown_failure
@@ -451,6 +511,7 @@ python expert_env_smoke_test.py
 source .env.local
 python api_smoke_test.py
 python main.py --episodes 1 --max-steps 30 --clear-results
+python main.py --episodes 1 --max-steps 80 --clear-results
 python main.py --episodes 10 --max-steps 30 --clear-results
 ```
 
