@@ -15,6 +15,7 @@ initialize
   -> format_repair, only when Action parsing fails
   -> invalid_action_retry, only when Action is not available
   -> step
+  -> stuck_reflection, only when the same valid action repeats
   -> route
   -> finalize
 ```
@@ -46,6 +47,10 @@ invalid_action_retry_node:
 step_node:
     execute env.step(action), log result, update feedback and guard counters
 
+stuck_reflection_node:
+    if the same valid action repeats for several steps without success, inject a short feedback
+    message telling the next act step to choose a different strategy
+
 route_after_step:
     continue to act or stop at finalize
 
@@ -63,13 +68,17 @@ human_review
 memory_update
 ```
 
-The current implementation already includes two graph-native repair branches:
+The current implementation already includes two graph-native repair branches and one lightweight
+stuck guard:
 
 ```text
 act
   -> step, when Action is parseable
   -> format_repair -> step, when Action parsing fails once
   -> invalid_action_retry -> step, when Action is parseable but unavailable
+
+step
+  -> stuck_reflection -> act, when the same valid action repeats without success
 ```
 
 If repair still fails, the episode falls back to the existing logged failure path. This keeps the
@@ -79,6 +88,10 @@ appended under `[FORMAT_REPAIR_RAW_RESPONSE]` or `[INVALID_ACTION_RETRY_RAW_RESP
 Both repair branches are intentionally one-shot guards. They reduce obvious LLM interface failures
 without adding memory, reflection, or replanning, so the experiment remains close to the original
 ReAct baseline.
+
+The stuck reflection branch is also intentionally small. It does not summarize the whole trajectory
+or create a new plan. It only detects a repeated-action loop and passes targeted feedback into the
+next ReAct prompt.
 
 ## Install
 

@@ -40,6 +40,8 @@ from react_agent import ReActAgent, parse_action, parse_thought  # noqa: E402
 
 
 RESULTS_DIR = PROJECT_DIR / "results"
+STUCK_REPEAT_WINDOW = 3
+MAX_STUCK_REFLECTIONS_PER_EPISODE = 2
 
 
 class GraphState(TypedDict, total=False):
@@ -57,6 +59,8 @@ class GraphState(TypedDict, total=False):
     raw_response: str
     format_repair_attempted: bool
     invalid_action_retry_attempted: bool
+    stuck_reflection_count: int
+    stuck_reflection_reason: str | None
     step_number: int
     success: bool
     total_reward: float
@@ -157,6 +161,29 @@ def _is_action_available(action: str, admissible_commands: list[str]) -> bool:
     return action in admissible_commands
 
 
+def _is_repeated_action_loop(step_logs: list[dict[str, Any]]) -> bool:
+    if len(step_logs) < STUCK_REPEAT_WINDOW:
+        return False
+    recent_logs = step_logs[-STUCK_REPEAT_WINDOW:]
+    recent_actions = [str(item.get("action", "")) for item in recent_logs]
+    if not recent_actions[0] or len(set(recent_actions)) != 1:
+        return False
+    return all(
+        item.get("action_valid", False)
+        and not item.get("format_error", False)
+        and not item.get("success", False)
+        for item in recent_logs
+    )
+
+
+def _should_trigger_stuck_reflection(state: GraphState) -> bool:
+    if state["done"] or state.get("feedback"):
+        return False
+    if state.get("stuck_reflection_count", 0) >= MAX_STUCK_REFLECTIONS_PER_EPISODE:
+        return False
+    return _is_repeated_action_loop(state["step_logs"])
+
+
 def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
     if use_mock:
         return MockALFWorldEnv(), ReActAgent(MockLLMClient())
@@ -193,6 +220,8 @@ def initialize_node(state: GraphState) -> dict[str, Any]:
         "step_logs": [],
         "feedback": None,
         "consecutive_format_errors": 0,
+        "stuck_reflection_count": 0,
+        "stuck_reflection_reason": None,
         "early_stop_reason": None,
         "done": False,
     }
@@ -280,6 +309,8 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "raw_response": state["raw_response"],
         "format_repair_attempted": state.get("format_repair_attempted", False),
         "invalid_action_retry_attempted": state.get("invalid_action_retry_attempted", False),
+        "stuck_reflection_count": state.get("stuck_reflection_count", 0),
+        "stuck_reflection_reason": state.get("stuck_reflection_reason"),
         "new_observation": new_observation,
         "reward": reward,
         "done": done,
@@ -321,8 +352,31 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "step_logs": state["step_logs"] + [step_log],
         "feedback": feedback,
         "consecutive_format_errors": consecutive_format_errors,
+        "stuck_reflection_reason": None,
         "early_stop_reason": early_stop_reason,
         "done": graph_done,
+    }
+
+
+def stuck_reflection_node(state: GraphState) -> dict[str, Any]:
+    repeated_action = state["step_logs"][-1]["action"]
+    admissible_commands = _admissible_commands_from(state["current_info"])
+    alternatives = [action for action in admissible_commands if action != repeated_action]
+    preview = "; ".join(alternatives[:8]) or "(no alternatives provided)"
+    reason = (
+        f"Repeated the same valid action {repeated_action!r} for "
+        f"{STUCK_REPEAT_WINDOW} consecutive steps without success."
+    )
+    feedback = (
+        f"{reason} Do not repeat that action immediately. "
+        f"Pick a different action that changes location, opens a new container, "
+        f"takes a visible object, treats a held object, or places it toward the goal. "
+        f"Alternative available actions include: {preview}"
+    )
+    return {
+        "feedback": feedback,
+        "stuck_reflection_count": state.get("stuck_reflection_count", 0) + 1,
+        "stuck_reflection_reason": reason,
     }
 
 
@@ -348,8 +402,12 @@ def finalize_node(state: GraphState) -> dict[str, Any]:
     return {"summary": summary}
 
 
-def route_after_step(state: GraphState) -> Literal["act", "finalize"]:
-    return "finalize" if state["done"] else "act"
+def route_after_step(state: GraphState) -> Literal["act", "stuck_reflection", "finalize"]:
+    if state["done"]:
+        return "finalize"
+    if _should_trigger_stuck_reflection(state):
+        return "stuck_reflection"
+    return "act"
 
 
 def route_after_act(state: GraphState) -> Literal["format_repair", "invalid_action_retry", "step"]:
@@ -376,6 +434,7 @@ def build_graph() -> Any:
     graph.add_node("act", act_node)
     graph.add_node("format_repair", format_repair_node)
     graph.add_node("invalid_action_retry", invalid_action_retry_node)
+    graph.add_node("stuck_reflection", stuck_reflection_node)
     graph.add_node("step", step_node)
     graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "initialize")
@@ -402,8 +461,9 @@ def build_graph() -> Any:
     graph.add_conditional_edges(
         "step",
         route_after_step,
-        {"act": "act", "finalize": "finalize"},
+        {"act": "act", "stuck_reflection": "stuck_reflection", "finalize": "finalize"},
     )
+    graph.add_edge("stuck_reflection", "act")
     graph.add_edge("finalize", END)
     return graph.compile()
 
