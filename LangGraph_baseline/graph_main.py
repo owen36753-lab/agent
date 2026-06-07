@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -64,6 +65,8 @@ class GraphState(TypedDict, total=False):
     raw_response: str
     format_repair_attempted: bool
     invalid_action_retry_attempted: bool
+    progress_hint: str | None
+    progress_hint_count: int
     stuck_reflection_count: int
     stuck_reflection_reason: str | None
     step_number: int
@@ -117,6 +120,159 @@ def _feedback_from_previous_step(
             f"Previous action was invalid: {action!r}. "
             f"Choose exactly one available action. Examples now available: {preview}"
         )
+    return None
+
+
+def _parse_task(goal: str) -> dict[str, str | None]:
+    goal_text = goal.lower()
+    treatment = next(
+        (name for name in ("heat", "cool", "clean") if re.search(rf"\b{name}\b", goal_text)),
+        None,
+    )
+    object_match = None
+    if treatment:
+        object_match = re.search(
+            rf"\b{treatment}\s+(?:(?:some|a|an|the|two)\s+)?([a-z]+)",
+            goal_text,
+        )
+    if not object_match:
+        object_match = re.search(
+            r"\bput\s+(?:(?:some|a|an|the|two)\s+)?([a-z]+)",
+            goal_text,
+        )
+    target_match = re.search(r"\b(?:put|place|move)\b.*\b(?:in|into|on)\s+([a-z]+)", goal_text)
+    return {
+        "object": object_match.group(1) if object_match else None,
+        "treatment": treatment,
+        "target": target_match.group(1) if target_match else None,
+    }
+
+
+def _object_instance_from_action(action: str, object_name: str) -> str | None:
+    match = re.search(rf"\b({re.escape(object_name)}\s+\d+)\b", action)
+    return match.group(1) if match else None
+
+
+def _object_state_from_history(
+    step_logs: list[dict[str, Any]],
+    object_name: str,
+    treatment: str | None,
+) -> tuple[str | None, set[str]]:
+    held_object: str | None = None
+    treated_objects: set[str] = set()
+    for step in step_logs:
+        action = str(step.get("action", ""))
+        object_instance = _object_instance_from_action(action, object_name)
+        if not object_instance:
+            continue
+        if action.startswith(f"take {object_instance} from "):
+            held_object = object_instance
+        if treatment and action.startswith(f"{treatment} {object_instance} with "):
+            treated_objects.add(object_instance)
+            held_object = object_instance
+        if action.startswith(f"move {object_instance} to "):
+            held_object = None
+    return held_object, treated_objects
+
+
+def _first_action_matching(admissible_commands: list[str], predicate: Any) -> str | None:
+    return next((action for action in admissible_commands if predicate(action)), None)
+
+
+def _progress_hint_for_action(action: str, reason: str) -> str:
+    return (
+        "Task progress hint: choose this exact available action now if it is still listed: "
+        f"{action!r}. {reason}"
+    )
+
+
+def _build_progress_hint(
+    goal: str,
+    step_logs: list[dict[str, Any]],
+    admissible_commands: list[str],
+) -> str | None:
+    task = _parse_task(goal)
+    object_name = task["object"]
+    treatment = task["treatment"]
+    target = task["target"]
+    if not object_name:
+        return None
+
+    held_object, treated_objects = _object_state_from_history(
+        step_logs,
+        object_name,
+        treatment,
+    )
+    object_prefix = held_object or object_name
+    is_treated = bool(held_object and held_object in treated_objects)
+
+    take_action = _first_action_matching(
+        admissible_commands,
+        lambda action: action.startswith(f"take {object_name} "),
+    )
+    if not held_object and take_action:
+        return _progress_hint_for_action(
+            take_action,
+            f"The goal object {object_name!r} is visible and should be picked up before treatment or placement.",
+        )
+
+    if held_object and treatment and not is_treated:
+        treatment_action = _first_action_matching(
+            admissible_commands,
+            lambda action: action.startswith(f"{treatment} {held_object} with "),
+        )
+        if treatment_action:
+            return _progress_hint_for_action(
+                treatment_action,
+                f"The agent is already holding {held_object!r}; the next required subgoal is to {treatment} it.",
+            )
+
+        tool_for_treatment = {"heat": "microwave", "cool": "fridge", "clean": "sinkbasin"}.get(
+            treatment
+        )
+        if tool_for_treatment:
+            go_to_tool = _first_action_matching(
+                admissible_commands,
+                lambda action: action.startswith(f"go to {tool_for_treatment} "),
+            )
+            if go_to_tool:
+                return _progress_hint_for_action(
+                    go_to_tool,
+                    f"The agent is holding {held_object!r}; go to the {tool_for_treatment} to {treatment} it.",
+                )
+
+    ready_to_place = bool(held_object and (not treatment or is_treated))
+    if ready_to_place and target:
+        move_to_target = _first_action_matching(
+            admissible_commands,
+            lambda action: action.startswith(f"move {object_prefix} to {target} "),
+        )
+        if move_to_target:
+            return _progress_hint_for_action(
+                move_to_target,
+                f"The object is ready for the final placement in/on the goal receptacle {target!r}.",
+            )
+
+        open_target = _first_action_matching(
+            admissible_commands,
+            lambda action: action.startswith(f"open {target} "),
+        )
+        if open_target:
+            return _progress_hint_for_action(
+                open_target,
+                f"The object is ready for placement, but the goal receptacle {target!r} is closed.",
+            )
+
+        go_to_target = _first_action_matching(
+            admissible_commands,
+            lambda action: action.startswith(f"go to {target} "),
+        )
+        if go_to_target:
+            return _progress_hint_for_action(
+                go_to_target,
+                f"The object is ready for final placement; go to the goal receptacle {target!r}.",
+            )
+
     return None
 
 
@@ -293,11 +449,32 @@ def initialize_node(state: GraphState) -> dict[str, Any]:
         "final_observation": observation,
         "step_logs": [],
         "feedback": None,
+        "progress_hint": None,
+        "progress_hint_count": 0,
         "consecutive_format_errors": 0,
         "stuck_reflection_count": 0,
         "stuck_reflection_reason": None,
         "early_stop_reason": None,
         "done": False,
+    }
+
+
+def progress_hint_node(state: GraphState) -> dict[str, Any]:
+    if state.get("feedback"):
+        return {"progress_hint": None}
+
+    admissible_commands = _admissible_commands_from(state["current_info"])
+    progress_hint = _build_progress_hint(
+        state["goal"],
+        state["step_logs"],
+        admissible_commands,
+    )
+    if not progress_hint:
+        return {"progress_hint": None}
+    return {
+        "feedback": progress_hint,
+        "progress_hint": progress_hint,
+        "progress_hint_count": state.get("progress_hint_count", 0) + 1,
     }
 
 
@@ -383,6 +560,8 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "raw_response": state["raw_response"],
         "format_repair_attempted": state.get("format_repair_attempted", False),
         "invalid_action_retry_attempted": state.get("invalid_action_retry_attempted", False),
+        "progress_hint": state.get("progress_hint"),
+        "progress_hint_count": state.get("progress_hint_count", 0),
         "stuck_reflection_count": state.get("stuck_reflection_count", 0),
         "stuck_reflection_reason": state.get("stuck_reflection_reason"),
         "new_observation": new_observation,
@@ -427,6 +606,7 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "observation": state["observation"] if format_error else new_observation,
         "step_logs": state["step_logs"] + [step_log],
         "feedback": feedback,
+        "progress_hint": None,
         "consecutive_format_errors": consecutive_format_errors,
         "stuck_reflection_reason": None,
         "early_stop_reason": early_stop_reason,
@@ -476,12 +656,12 @@ def finalize_node(state: GraphState) -> dict[str, Any]:
     return {"summary": summary}
 
 
-def route_after_step(state: GraphState) -> Literal["act", "stuck_reflection", "finalize"]:
+def route_after_step(state: GraphState) -> Literal["progress_hint", "stuck_reflection", "finalize"]:
     if state["done"]:
         return "finalize"
     if _should_trigger_stuck_reflection(state):
         return "stuck_reflection"
-    return "act"
+    return "progress_hint"
 
 
 def route_after_act(state: GraphState) -> Literal["format_repair", "invalid_action_retry", "step"]:
@@ -505,6 +685,7 @@ def build_graph() -> Any:
 
     graph = StateGraph(GraphState)
     graph.add_node("initialize", initialize_node)
+    graph.add_node("progress_hint", progress_hint_node)
     graph.add_node("act", act_node)
     graph.add_node("format_repair", format_repair_node)
     graph.add_node("invalid_action_retry", invalid_action_retry_node)
@@ -512,7 +693,8 @@ def build_graph() -> Any:
     graph.add_node("step", step_node)
     graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "initialize")
-    graph.add_edge("initialize", "act")
+    graph.add_edge("initialize", "progress_hint")
+    graph.add_edge("progress_hint", "act")
     graph.add_conditional_edges(
         "act",
         route_after_act,
@@ -535,9 +717,13 @@ def build_graph() -> Any:
     graph.add_conditional_edges(
         "step",
         route_after_step,
-        {"act": "act", "stuck_reflection": "stuck_reflection", "finalize": "finalize"},
+        {
+            "progress_hint": "progress_hint",
+            "stuck_reflection": "stuck_reflection",
+            "finalize": "finalize",
+        },
     )
-    graph.add_edge("stuck_reflection", "act")
+    graph.add_edge("stuck_reflection", "progress_hint")
     graph.add_edge("finalize", END)
     return graph.compile()
 

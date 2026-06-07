@@ -11,6 +11,7 @@ The first LangGraph version is intentionally conservative:
 
 ```text
 initialize
+  -> progress_hint, when a direct subgoal action is available
   -> act
   -> format_repair, only when Action parsing fails
   -> invalid_action_retry, only when Action is not available
@@ -32,6 +33,10 @@ explicit:
 ```text
 initialize_node:
     reset env, extract goal, clear agent history
+
+progress_hint_node:
+    inspect the goal, previous actions, and admissible_commands; if a direct subgoal action is
+    available, inject a short feedback hint before the next ReAct call
 
 act_node:
     build ReAct prompt, call LLM, parse Thought / Action
@@ -68,10 +73,13 @@ human_review
 memory_update
 ```
 
-The current implementation already includes two graph-native repair branches and one lightweight
-stuck guard:
+The current implementation includes a lightweight task-progress hint, two graph-native repair
+branches, and one stuck guard:
 
 ```text
+initialize / step
+  -> progress_hint -> act, when actions like take/heat/move-to-target are directly available
+
 act
   -> step, when Action is parseable
   -> format_repair -> step, when Action parsing fails once
@@ -121,6 +129,23 @@ finalized with `early_stop_reason: runtime_exceeded`.
 
 Relative `ALFWORLD_CONFIG_PATH` values are resolved against `ReAct_baseline` first, so the same
 `.env.local` can be reused from this directory.
+
+## Progress Hints
+
+`progress_hint_node` is intentionally narrower than a planner. It does not search the map or create
+a full route. It only detects obvious one-step progress from the currently available actions:
+
+```text
+take <goal-object> ...
+heat/cool/clean <held-object> with ...
+go to the required treatment tool
+open the goal receptacle
+move <ready-object> to <goal-receptacle>
+```
+
+The hint is passed through the existing `Previous step feedback` slot, so the LLM still has to output
+the final `Thought:` and `Action:` lines. This targets failures where the model sees a correct action
+such as `heat apple 3 with microwave 1` but chooses to wander instead.
 
 ## Install
 
