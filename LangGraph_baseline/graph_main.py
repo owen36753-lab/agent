@@ -40,6 +40,7 @@ from failure_classifier import classify_failure  # noqa: E402
 from llm_client import MockLLMClient, OpenAICompatibleLLMClient  # noqa: E402
 from logger import ExperimentLogger  # noqa: E402
 from react_agent import ReActAgent, parse_action, parse_thought  # noqa: E402
+from object_grounding import build_object_grounding, object_instance_from_action  # noqa: E402
 
 
 RESULTS_DIR = PROJECT_DIR / "results"
@@ -65,6 +66,8 @@ class GraphState(TypedDict, total=False):
     raw_response: str
     format_repair_attempted: bool
     invalid_action_retry_attempted: bool
+    object_grounding: dict[str, Any]
+    object_grounding_count: int
     progress_hint: str | None
     progress_hint_count: int
     stuck_reflection_count: int
@@ -148,33 +151,6 @@ def _parse_task(goal: str) -> dict[str, str | None]:
     }
 
 
-def _object_instance_from_action(action: str, object_name: str) -> str | None:
-    match = re.search(rf"\b({re.escape(object_name)}\s+\d+)\b", action)
-    return match.group(1) if match else None
-
-
-def _object_state_from_history(
-    step_logs: list[dict[str, Any]],
-    object_name: str,
-    treatment: str | None,
-) -> tuple[str | None, set[str]]:
-    held_object: str | None = None
-    treated_objects: set[str] = set()
-    for step in step_logs:
-        action = str(step.get("action", ""))
-        object_instance = _object_instance_from_action(action, object_name)
-        if not object_instance:
-            continue
-        if action.startswith(f"take {object_instance} from "):
-            held_object = object_instance
-        if treatment and action.startswith(f"{treatment} {object_instance} with "):
-            treated_objects.add(object_instance)
-            held_object = object_instance
-        if action.startswith(f"move {object_instance} to "):
-            held_object = None
-    return held_object, treated_objects
-
-
 def _first_action_matching(admissible_commands: list[str], predicate: Any) -> str | None:
     return next((action for action in admissible_commands if predicate(action)), None)
 
@@ -190,6 +166,7 @@ def _build_progress_hint(
     goal: str,
     step_logs: list[dict[str, Any]],
     admissible_commands: list[str],
+    object_grounding: dict[str, Any] | None = None,
 ) -> str | None:
     task = _parse_task(goal)
     object_name = task["object"]
@@ -198,22 +175,32 @@ def _build_progress_hint(
     if not object_name:
         return None
 
-    held_object, treated_objects = _object_state_from_history(
-        step_logs,
+    grounding = object_grounding or build_object_grounding(
         object_name,
+        step_logs,
+        admissible_commands,
         treatment,
     )
+    held_object = grounding.get("held_object")
+    treated_objects = set(grounding.get("treated_objects", []))
     object_prefix = held_object or object_name
     is_treated = bool(held_object and held_object in treated_objects)
 
     take_action = _first_action_matching(
         admissible_commands,
-        lambda action: action.startswith(f"take {object_name} "),
+        lambda action: action.startswith("take ")
+        and any(
+            candidate["action"] == action for candidate in grounding.get("current_candidates", [])
+        ),
     )
     if not held_object and take_action:
+        take_instance = object_instance_from_action(take_action) or object_name
         return _progress_hint_for_action(
             take_action,
-            f"The goal object {object_name!r} is visible and should be picked up before treatment or placement.",
+            (
+                f"The visible object {take_instance!r} is grounded as the goal object "
+                f"{object_name!r} and should be picked up before treatment or placement."
+            ),
         )
 
     if held_object and treatment and not is_treated:
@@ -459,6 +446,8 @@ def initialize_node(state: GraphState) -> dict[str, Any]:
         "final_observation": observation,
         "step_logs": [],
         "feedback": None,
+        "object_grounding": {},
+        "object_grounding_count": 0,
         "progress_hint": None,
         "progress_hint_count": 0,
         "consecutive_format_errors": 0,
@@ -469,15 +458,37 @@ def initialize_node(state: GraphState) -> dict[str, Any]:
     }
 
 
+def object_grounding_node(state: GraphState) -> dict[str, Any]:
+    task = _parse_task(state["goal"])
+    object_name = task["object"]
+    if not object_name:
+        return {"object_grounding": {}}
+    admissible_commands = _admissible_commands_from(state["current_info"])
+    grounding = build_object_grounding(
+        object_name,
+        state["step_logs"],
+        admissible_commands,
+        task["treatment"],
+    )
+    return {
+        "admissible_commands": admissible_commands,
+        "object_grounding": grounding,
+        "object_grounding_count": state.get("object_grounding_count", 0) + 1,
+    }
+
+
 def progress_hint_node(state: GraphState) -> dict[str, Any]:
     if state.get("feedback"):
         return {"progress_hint": None}
 
-    admissible_commands = _admissible_commands_from(state["current_info"])
+    admissible_commands = state.get("admissible_commands") or _admissible_commands_from(
+        state["current_info"]
+    )
     progress_hint = _build_progress_hint(
         state["goal"],
         state["step_logs"],
         admissible_commands,
+        state.get("object_grounding"),
     )
     if not progress_hint:
         return {"progress_hint": None}
@@ -503,6 +514,7 @@ def act_node(state: GraphState) -> dict[str, Any]:
         "raw_response": raw_response,
         "format_repair_attempted": False,
         "invalid_action_retry_attempted": False,
+        "object_grounding": state.get("object_grounding", {}),
     }
 
 
@@ -570,6 +582,8 @@ def step_node(state: GraphState) -> dict[str, Any]:
         "raw_response": state["raw_response"],
         "format_repair_attempted": state.get("format_repair_attempted", False),
         "invalid_action_retry_attempted": state.get("invalid_action_retry_attempted", False),
+        "object_grounding": state.get("object_grounding", {}),
+        "object_grounding_count": state.get("object_grounding_count", 0),
         "progress_hint": state.get("progress_hint"),
         "progress_hint_count": state.get("progress_hint_count", 0),
         "stuck_reflection_count": state.get("stuck_reflection_count", 0),
@@ -666,12 +680,14 @@ def finalize_node(state: GraphState) -> dict[str, Any]:
     return {"summary": summary}
 
 
-def route_after_step(state: GraphState) -> Literal["progress_hint", "stuck_reflection", "finalize"]:
+def route_after_step(
+    state: GraphState,
+) -> Literal["object_grounding", "stuck_reflection", "finalize"]:
     if state["done"]:
         return "finalize"
     if _should_trigger_stuck_reflection(state):
         return "stuck_reflection"
-    return "progress_hint"
+    return "object_grounding"
 
 
 def route_after_act(state: GraphState) -> Literal["format_repair", "invalid_action_retry", "step"]:
@@ -695,6 +711,7 @@ def build_graph() -> Any:
 
     graph = StateGraph(GraphState)
     graph.add_node("initialize", initialize_node)
+    graph.add_node("object_grounding", object_grounding_node)
     graph.add_node("progress_hint", progress_hint_node)
     graph.add_node("act", act_node)
     graph.add_node("format_repair", format_repair_node)
@@ -703,7 +720,8 @@ def build_graph() -> Any:
     graph.add_node("step", step_node)
     graph.add_node("finalize", finalize_node)
     graph.add_edge(START, "initialize")
-    graph.add_edge("initialize", "progress_hint")
+    graph.add_edge("initialize", "object_grounding")
+    graph.add_edge("object_grounding", "progress_hint")
     graph.add_edge("progress_hint", "act")
     graph.add_conditional_edges(
         "act",
@@ -728,12 +746,12 @@ def build_graph() -> Any:
         "step",
         route_after_step,
         {
-            "progress_hint": "progress_hint",
+            "object_grounding": "object_grounding",
             "stuck_reflection": "stuck_reflection",
             "finalize": "finalize",
         },
     )
-    graph.add_edge("stuck_reflection", "progress_hint")
+    graph.add_edge("stuck_reflection", "object_grounding")
     graph.add_edge("finalize", END)
     return graph.compile()
 

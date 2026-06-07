@@ -11,6 +11,7 @@ The first LangGraph version is intentionally conservative:
 
 ```text
 initialize
+  -> object_grounding, conservatively map visible/held objects to the goal object
   -> progress_hint, when a direct subgoal action is available
   -> act
   -> format_repair, only when Action parsing fails
@@ -33,6 +34,10 @@ explicit:
 ```text
 initialize_node:
     reset env, extract goal, clear agent history
+
+object_grounding_node:
+    map visible or held object instances to the goal object with conservative directed rules:
+    exact match is allowed, subclass-to-superclass is allowed, sibling categories are rejected
 
 progress_hint_node:
     inspect the goal, previous actions, and admissible_commands; if a direct subgoal action is
@@ -78,6 +83,7 @@ branches, and one stuck guard:
 
 ```text
 initialize / step
+  -> object_grounding, when current action candidates need to be interpreted against the goal object
   -> progress_hint -> act, when actions like take/heat/move-to-target are directly available
 
 act
@@ -146,6 +152,29 @@ move <ready-object> to <goal-receptacle>
 The hint is passed through the existing `Previous step feedback` slot, so the LLM still has to output
 the final `Thought:` and `Action:` lines. This targets failures where the model sees a correct action
 such as `heat apple 3 with microwave 1` but chooses to wander instead.
+
+## Object Grounding
+
+`object_grounding_node` handles a narrow generalization problem found in tasks such as clean/place.
+For example, a goal may say `clean some cloth`, while ALFWorld exposes `handtowel 1` or `towel 1`.
+The node treats those as valid candidates for the superclass goal `cloth`, so the progress hint can
+suggest actions like:
+
+```text
+take handtowel 1 from handtowelholder 1
+clean handtowel 1 with sinkbasin 1
+```
+
+The rule is directional and conservative. If the goal is a concrete object such as `pan`, a sibling
+object such as `pot` is rejected even though both can be cookware. This avoids solving one task by
+loosening object names so far that the agent starts treating related objects as interchangeable.
+
+Run the grounding checks with:
+
+```bash
+python object_grounding_smoke_test.py
+python progress_hint_grounding_smoke_test.py
+```
 
 ## Install
 
