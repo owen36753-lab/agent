@@ -183,6 +183,23 @@ source ../ReAct_baseline/.env.local
 python graph_main.py --episodes 1 --max-steps 80 --max-runtime-seconds 1800
 ```
 
+To restrict evaluation to one ALFWorld task family, pass `--task-types`:
+
+```bash
+python graph_main.py --episodes 1 --task-types 1 --run-id pick_place_smoke
+```
+
+Task type ids:
+
+```text
+1 Pick & Place
+2 Examine in Light
+3 Clean & Place
+4 Heat & Place
+5 Cool & Place
+6 Pick Two & Place
+```
+
 Results are written to:
 
 ```text

@@ -414,13 +414,23 @@ def _resolve_alfworld_config_path(config_path: str) -> str:
     return config_path
 
 
-def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
+def _parse_task_types(raw_task_types: str | None) -> list[int] | None:
+    if not raw_task_types:
+        return None
+    return [int(item.strip()) for item in raw_task_types.split(",") if item.strip()]
+
+
+def _build_components(use_mock: bool, task_types: list[int] | None = None) -> tuple[Any, ReActAgent]:
     if use_mock:
         return MockALFWorldEnv(), ReActAgent(MockLLMClient())
     if LLM_PROVIDER != "openai_compatible":
         raise ValueError("Set LLM_PROVIDER=openai_compatible for real runs, or use --mock.")
 
-    env = ALFWorldEnv(_resolve_alfworld_config_path(ALFWORLD_CONFIG_PATH), ALFWORLD_SPLIT)
+    env = ALFWorldEnv(
+        _resolve_alfworld_config_path(ALFWORLD_CONFIG_PATH),
+        ALFWORLD_SPLIT,
+        task_types=task_types,
+    )
     client = OpenAICompatibleLLMClient(
         api_key=LLM_API_KEY,
         model=LLM_MODEL,
@@ -772,11 +782,17 @@ def main() -> None:
         default=None,
         help="Optional explicit results directory. Defaults to results/runs/<run-id>.",
     )
+    parser.add_argument(
+        "--task-types",
+        default=None,
+        help="Comma-separated ALFWorld task type ids, e.g. 1 or 3,5. Ignored for --mock.",
+    )
     parser.add_argument("--mock", action="store_true", help="Run deterministic graph smoke test.")
     parser.add_argument("--clear-results", action="store_true")
     args = parser.parse_args()
 
-    env, agent = _build_components(args.mock)
+    task_types = _parse_task_types(args.task_types)
+    env, agent = _build_components(args.mock, task_types)
     run_id = args.run_id or _default_run_id()
     results_dir = args.results_dir or RESULTS_DIR / "runs" / run_id
     logger = ExperimentLogger(results_dir, clear_existing=args.clear_results)
