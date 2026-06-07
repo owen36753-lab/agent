@@ -1,6 +1,6 @@
 # Generated experiment outputs
-results/*.json
-results/*.jsonl
+results/*
+!results/.gitkeep
 
 # Local secrets
 .env

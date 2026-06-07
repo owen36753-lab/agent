@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -41,6 +43,7 @@ from react_agent import ReActAgent, parse_action, parse_thought  # noqa: E402
 
 RESULTS_DIR = PROJECT_DIR / "results"
 STUCK_REPEAT_WINDOW = 3
+STUCK_CYCLE_WINDOW = 4
 MAX_STUCK_REFLECTIONS_PER_EPISODE = 2
 
 
@@ -50,6 +53,8 @@ class GraphState(TypedDict, total=False):
     agent: ReActAgent
     logger: ExperimentLogger
     max_steps: int
+    max_runtime_seconds: float | None
+    start_time: float
     goal: str
     observation: str
     current_info: dict[str, Any]
@@ -176,12 +181,81 @@ def _is_repeated_action_loop(step_logs: list[dict[str, Any]]) -> bool:
     )
 
 
+def _is_alternating_action_loop(step_logs: list[dict[str, Any]]) -> bool:
+    if len(step_logs) < STUCK_CYCLE_WINDOW:
+        return False
+    recent_logs = step_logs[-STUCK_CYCLE_WINDOW:]
+    recent_actions = [str(item.get("action", "")) for item in recent_logs]
+    if not all(recent_actions):
+        return False
+    if recent_actions[0] == recent_actions[1]:
+        return False
+    if recent_actions != recent_actions[:2] * 2:
+        return False
+    return all(
+        item.get("action_valid", False)
+        and not item.get("format_error", False)
+        and not item.get("success", False)
+        for item in recent_logs
+    )
+
+
+def _stuck_loop_reason(step_logs: list[dict[str, Any]]) -> str | None:
+    if _is_repeated_action_loop(step_logs):
+        action = step_logs[-1]["action"]
+        return (
+            f"Repeated the same valid action {action!r} for "
+            f"{STUCK_REPEAT_WINDOW} consecutive steps without success."
+        )
+    if _is_alternating_action_loop(step_logs):
+        actions = [str(item["action"]) for item in step_logs[-STUCK_CYCLE_WINDOW:]]
+        pattern = " -> ".join(actions[:2])
+        return (
+            f"Repeated the valid action cycle {pattern!r} for "
+            f"{STUCK_CYCLE_WINDOW} steps without success."
+        )
+    return None
+
+
 def _should_trigger_stuck_reflection(state: GraphState) -> bool:
     if state["done"] or state.get("feedback"):
         return False
     if state.get("stuck_reflection_count", 0) >= MAX_STUCK_REFLECTIONS_PER_EPISODE:
         return False
-    return _is_repeated_action_loop(state["step_logs"])
+    return _stuck_loop_reason(state["step_logs"]) is not None
+
+
+def _runtime_exceeded(state: GraphState) -> bool:
+    max_runtime_seconds = state.get("max_runtime_seconds")
+    if not max_runtime_seconds:
+        return False
+    return time.monotonic() - state["start_time"] >= max_runtime_seconds
+
+
+def _default_run_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _resolve_alfworld_config_path(config_path: str) -> str:
+    candidate = Path(config_path)
+    if candidate.is_file():
+        return str(candidate)
+    if not candidate.is_absolute():
+        react_relative = REACT_BASELINE_DIR / candidate
+        if react_relative.is_file():
+            return str(react_relative)
+
+    parts = list(candidate.parts)
+    if "configs" in parts:
+        config_suffix = Path(*parts[parts.index("configs") :])
+        react_config = REACT_BASELINE_DIR / config_suffix
+        if react_config.is_file():
+            return str(react_config)
+
+    react_named_config = REACT_BASELINE_DIR / "configs" / candidate.name
+    if react_named_config.is_file():
+        return str(react_named_config)
+    return config_path
 
 
 def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
@@ -190,7 +264,7 @@ def _build_components(use_mock: bool) -> tuple[Any, ReActAgent]:
     if LLM_PROVIDER != "openai_compatible":
         raise ValueError("Set LLM_PROVIDER=openai_compatible for real runs, or use --mock.")
 
-    env = ALFWorldEnv(ALFWORLD_CONFIG_PATH, ALFWORLD_SPLIT)
+    env = ALFWorldEnv(_resolve_alfworld_config_path(ALFWORLD_CONFIG_PATH), ALFWORLD_SPLIT)
     client = OpenAICompatibleLLMClient(
         api_key=LLM_API_KEY,
         model=LLM_MODEL,
@@ -332,6 +406,8 @@ def step_node(state: GraphState) -> dict[str, Any]:
     early_stop_reason = state.get("early_stop_reason")
     if consecutive_format_errors >= MAX_CONSECUTIVE_FORMAT_ERRORS:
         early_stop_reason = "format_collapse"
+    if not early_stop_reason and _runtime_exceeded(state):
+        early_stop_reason = "runtime_exceeded"
 
     reached_max_steps = step_number >= state["max_steps"]
     graph_done = bool(done or success or early_stop_reason or reached_max_steps)
@@ -359,14 +435,12 @@ def step_node(state: GraphState) -> dict[str, Any]:
 
 
 def stuck_reflection_node(state: GraphState) -> dict[str, Any]:
-    repeated_action = state["step_logs"][-1]["action"]
+    recent_actions = [str(item["action"]) for item in state["step_logs"][-STUCK_CYCLE_WINDOW:]]
     admissible_commands = _admissible_commands_from(state["current_info"])
-    alternatives = [action for action in admissible_commands if action != repeated_action]
+    avoid_actions = set(recent_actions)
+    alternatives = [action for action in admissible_commands if action not in avoid_actions]
     preview = "; ".join(alternatives[:8]) or "(no alternatives provided)"
-    reason = (
-        f"Repeated the same valid action {repeated_action!r} for "
-        f"{STUCK_REPEAT_WINDOW} consecutive steps without success."
-    )
+    reason = _stuck_loop_reason(state["step_logs"]) or "The recent actions are not making progress."
     feedback = (
         f"{reason} Do not repeat that action immediately. "
         f"Pick a different action that changes location, opens a new container, "
@@ -474,6 +548,7 @@ def run_episode(
     agent: ReActAgent,
     logger: ExperimentLogger,
     max_steps: int,
+    max_runtime_seconds: float | None,
 ) -> dict[str, Any]:
     graph = build_graph()
     final_state = graph.invoke(
@@ -483,6 +558,8 @@ def run_episode(
             "agent": agent,
             "logger": logger,
             "max_steps": max_steps,
+            "max_runtime_seconds": max_runtime_seconds,
+            "start_time": time.monotonic(),
         }
     )
     return final_state["summary"]
@@ -492,18 +569,45 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=NUM_EPISODES)
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=0.0,
+        help="Stop after this wall-clock budget between steps. 0 disables the guard.",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Optional run id. Defaults to a timestamp, isolating logs per run.",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Optional explicit results directory. Defaults to results/runs/<run-id>.",
+    )
     parser.add_argument("--mock", action="store_true", help="Run deterministic graph smoke test.")
     parser.add_argument("--clear-results", action="store_true")
     args = parser.parse_args()
 
     env, agent = _build_components(args.mock)
-    logger = ExperimentLogger(RESULTS_DIR, clear_existing=args.clear_results)
+    run_id = args.run_id or _default_run_id()
+    results_dir = args.results_dir or RESULTS_DIR / "runs" / run_id
+    logger = ExperimentLogger(results_dir, clear_existing=args.clear_results)
+    print(json.dumps({"run_id": run_id, "results_dir": str(results_dir)}, ensure_ascii=False))
 
     for episode_id in range(args.episodes):
-        summary = run_episode(episode_id, env, agent, logger, args.max_steps)
+        summary = run_episode(
+            episode_id,
+            env,
+            agent,
+            logger,
+            args.max_steps,
+            args.max_runtime_seconds or None,
+        )
         print(json.dumps(summary, ensure_ascii=False))
 
-    print(json.dumps(evaluate(RESULTS_DIR), ensure_ascii=False, indent=2))
+    print(json.dumps(evaluate(results_dir), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

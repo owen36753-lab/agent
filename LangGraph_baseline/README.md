@@ -15,7 +15,7 @@ initialize
   -> format_repair, only when Action parsing fails
   -> invalid_action_retry, only when Action is not available
   -> step
-  -> stuck_reflection, only when the same valid action repeats
+  -> stuck_reflection, only when a valid action loop repeats
   -> route
   -> finalize
 ```
@@ -48,8 +48,8 @@ step_node:
     execute env.step(action), log result, update feedback and guard counters
 
 stuck_reflection_node:
-    if the same valid action repeats for several steps without success, inject a short feedback
-    message telling the next act step to choose a different strategy
+    if the same valid action or a simple two-action cycle repeats without success, inject a short
+    feedback message telling the next act step to choose a different strategy
 
 route_after_step:
     continue to act or stop at finalize
@@ -78,7 +78,7 @@ act
   -> invalid_action_retry -> step, when Action is parseable but unavailable
 
 step
-  -> stuck_reflection -> act, when the same valid action repeats without success
+  -> stuck_reflection -> act, when a valid action loop repeats without success
 ```
 
 If repair still fails, the episode falls back to the existing logged failure path. This keeps the
@@ -90,8 +90,37 @@ without adding memory, reflection, or replanning, so the experiment remains clos
 ReAct baseline.
 
 The stuck reflection branch is also intentionally small. It does not summarize the whole trajectory
-or create a new plan. It only detects a repeated-action loop and passes targeted feedback into the
-next ReAct prompt.
+or create a new plan. It only detects a repeated-action loop, including simple two-action cycles,
+and passes targeted feedback into the next ReAct prompt.
+
+## Run Isolation
+
+Each run writes to its own directory by default:
+
+```text
+results/runs/<timestamp>/
+```
+
+This prevents a timed-out or still-shutting-down process from appending to the next run's logs. The
+program prints the selected `run_id` and `results_dir` before starting episodes.
+
+Use an explicit id when you want reproducible paths:
+
+```bash
+python graph_main.py --mock --run-id mock_debug --clear-results
+```
+
+Use a wall-clock guard for long local-model runs:
+
+```bash
+python graph_main.py --episodes 1 --max-steps 45 --max-runtime-seconds 1800
+```
+
+The runtime guard is checked between environment steps. If the budget is exceeded, the episode is
+finalized with `early_stop_reason: runtime_exceeded`.
+
+Relative `ALFWORLD_CONFIG_PATH` values are resolved against `ReAct_baseline` first, so the same
+`.env.local` can be reused from this directory.
 
 ## Install
 
@@ -126,13 +155,13 @@ Use the same local `.env.local` style as `ReAct_baseline`.
 
 ```bash
 source ../ReAct_baseline/.env.local
-python graph_main.py --episodes 1 --max-steps 80 --clear-results
+python graph_main.py --episodes 1 --max-steps 80 --max-runtime-seconds 1800
 ```
 
 Results are written to:
 
 ```text
-LangGraph_baseline/results/
+LangGraph_baseline/results/runs/<run_id>/
 ```
 
 Generated logs and local secrets are ignored by Git.

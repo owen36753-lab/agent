@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Protocol
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib import request
 
 
@@ -73,6 +73,16 @@ class OpenAICompatibleLLMClient:
                     f"Retrying in {delay:.1f}s ({attempt + 1}/{self.max_retries})."
                 )
                 print(f"LLM API response: {error_body}")
+                time.sleep(delay)
+            except (ConnectionError, TimeoutError, URLError, OSError) as exc:
+                if attempt >= self.max_retries:
+                    raise RuntimeError(f"LLM API request failed: {exc}") from exc
+
+                delay = self.retry_base_seconds * (2**attempt)
+                print(
+                    f"LLM API connection error: {exc}. "
+                    f"Retrying in {delay:.1f}s ({attempt + 1}/{self.max_retries})."
+                )
                 time.sleep(delay)
 
         raise RuntimeError("LLM API request failed after retries.")
